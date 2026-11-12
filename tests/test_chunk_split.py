@@ -59,7 +59,8 @@ def main():
         check("every chunk and part has a cost", set(costs) == {os.path.basename(p) for p in [files[0]] + parts})
         check("a part's cost is its estimate", all(int(costs[os.path.basename(p)]) == chunks.text_cost(t) for p, t in zip(parts, texts)))
     stopped_part_way(budget)
-    print("ok: %d parts, the functions as they were, and again after a worker stopped part way" % len(parts))
+    finished_but_lost(budget)
+    print("ok: %d parts, the functions as they were, and again after a worker stopped part way or its result was lost" % len(parts))
 
 
 def stopped_part_way(budget):
@@ -95,6 +96,40 @@ def stopped_part_way(budget):
                 texts.append(f.read())
         check("after a stopped worker the chunk is cut again", len(parts) >= 2)
         check("after a stopped worker every function is still there", "".join(t[len(PREAMBLE):] for t in texts) == "".join(big))
+
+
+
+def read_parts(path, made):
+    parts = [path] + sorted(made, key=lambda p: int(re.search(r"_(\d+)\.c$", p).group(1)))
+    texts = []
+    for p in parts:
+        with open(p, newline="") as f:
+            texts.append(f.read())
+    return parts, texts
+
+
+def finished_but_lost(budget):
+    """A worker that finished the cut but whose result was lost (another worker stopped and broke the pool): the lift's own run
+    finds the chunk cut already and keeps its parts; an earlier lift's parts beside a chunk that is small now still go"""
+    with tempfile.TemporaryDirectory(prefix="hookshot-chunk-lost-") as d:
+        big = [function(0x81000000 + 16 * i, 2000) for i in range(40)] + [function(0x81100000, 300000)] + \
+              [function(0x81200000 + 16 * i, 2000) for i in range(200)]
+        path = os.path.join(d, "code_001.c")
+        Path(path).write_text(PREAMBLE + "".join(big), newline=chr(10))
+        first = chunks.split_big(d, [path], budget=budget, jobs=1)
+        parts, texts = read_parts(path, first)
+        costs = Path(d, chunks.COSTS).read_text()
+        made = chunks.split_big(d, [path], budget=budget, jobs=1)   # (the run again, over the files the worker wrote)
+        again, texts_again = read_parts(path, made)
+        check("a chunk cut already keeps its parts", made == first and again == parts and texts_again == texts)
+        check("a chunk cut already keeps every function", "".join(t[len(PREAMBLE):] for t in texts_again) == "".join(big))
+        check("a chunk cut already keeps its costs", Path(d, chunks.COSTS).read_text() == costs)
+
+        small = [function(0x80000000 + 16 * i, 2000) for i in range(60)]
+        Path(path).write_text(PREAMBLE + "".join(small), newline=chr(10))   # (a later lift: the chunk is small now)
+        made = chunks.split_big(d, [path], budget=budget, jobs=1)
+        check("an earlier lift's parts beside a small chunk are removed",
+              not made and not any(f.startswith("code_001_") for f in os.listdir(d)))
 
 
 if __name__ == "__main__":
